@@ -13,14 +13,15 @@ local Dispatcher = {}
 Dispatcher.__index = Dispatcher
 
 function Dispatcher:execute(payload__local, settings__localEvent, eventValidationReport)
+	-- if catalyst event is no longer propagating, exit the event cycle
 	local eventBlacklist = self.eventBlacklist 
 
 	-- payload metadata
 	local event = payload__local.event
-	local args = payload__local.args or {}
+	local args = payload__local.args
 
 	-- event data
-	local stats = event.stats
+	local analytics = event.analytics
 	local parentEvent = event._parentEvent
 	local childEvents = event._childEvents
 	local connections = event._connections
@@ -52,7 +53,11 @@ function Dispatcher:execute(payload__local, settings__localEvent, eventValidatio
 	end
 
 	local function runDescendantEventHandlers()
-		if (settings__localEvent.dispatchDescendants and #childEvents > 0) then
+		if (#childEvents == 0) or (not self.catalyst._propagating) then
+			return
+		end
+		
+		if (settings__localEvent.dispatchChildren) then
 			for index = 1, #childEvents do
 				local childEvent = childEvents[index]
 
@@ -65,21 +70,31 @@ function Dispatcher:execute(payload__local, settings__localEvent, eventValidatio
 	end
 	
 	local function runAscendantEventHandlers()
-		if (settings__localEvent.dispatchAscendants and parentEvent and self.catalyst._propagating) then
+		if (not parentEvent) or (not self.catalyst._propagating) then
+			return
+		end
+		
+		if (settings__localEvent.dispatchParent) then
 			self:fire({
 				event = parentEvent,
 				args = args,
-				headers = {
+				headers__local = {
 					dispatchDescendants = false,
+					dispatchChildren = false 
 				}
 			})
 		end
 	end
 	
 	local function runLinkedEventHandlers()
-		if (settings__localEvent.dispatchLinked and #linkedEvents > 0) then
+		if (#linkedEvents == 0) or (not self.catalyst._propagating) then
+			return
+		end
+		
+		if (settings__localEvent.dispatchLinked) then
 			for index = 1, #linkedEvents do
 				local linkedEvent = linkedEvents[index]
+				
 				self:fire({
 					event = linkedEvent,
 					args = args
@@ -106,28 +121,43 @@ function Dispatcher:execute(payload__local, settings__localEvent, eventValidatio
 	end
 
 	-- update time last dispatched to now
-	stats.timeLastDispatched = tick()
+	analytics.timeLastDispatched = tick()
 end
 
-function Dispatcher:fire(payload__local, initialDispatch)
-	if (self.blacklist[payload__local.event]) then
+function Dispatcher:fire(payload__local)
+	local event = payload__local.event
+	--local initialDispatch = event == self.catalyst
+	
+	-- debounce blacklisted events to avoid cyclic occurances
+	if (self.blacklist[event]) then
 		Debug.error("Cyclic event detected. Make sure your events are properly connected.") 
 		return
 	end
 	
-	local settings__localEvent = payload__local.event:getSettingsWithHeaders(self.headers__original)
+	local settings__localEvent = table.clone(event.settings)
+	payload__local.args = payload__local.args or {}
 	
-	-- on all dispatches that are not the original dispatch (such as recursive dispatches), use the
-	-- headers that are provided in the local payload.
-	if (payload__local.headers and not initialDispatch) then
-		for key, value in next, payload__local.headers do
+	-- apply global headers, if any
+	if (self.headers__global) then
+		for key, value in next, self.headers__global do
+			settings__localEvent[key] = value
+		end
+	end
+	
+	-- apply local headers, if any
+	if (payload__local.headers__local) then
+		for key, value in next, payload__local.headers__local do
 			settings__localEvent[key] = value
 		end
 	end
 	
 	-- validate the event dispatch and update dispatch stats
-	local eventValidationReport = payload__local.event:validateDispatch(settings__localEvent) 
-	eventValidationReport:updateStats()
+	local eventValidationReport = event:validateDispatch(settings__localEvent)
+	
+	--------------------------------------
+	--- TODO: UPDATE ANALYTICS HERE!!! ---
+	
+	--------------------------------------
 	
 	-- execute the dispatch 
 	self:execute(payload__local, settings__localEvent, eventValidationReport)
@@ -137,11 +167,11 @@ end
 
 function Dispatcher.new(payload__original)
 	local dispatcher = setmetatable({}, Dispatcher)
-
+	
 	dispatcher.blacklist = {}
 	dispatcher.catalyst = payload__original.event
-	dispatcher.headers__original = payload__original.headers
-
+	dispatcher.headers__global = payload__original.headers__global
+ 
 	return dispatcher
 end
 

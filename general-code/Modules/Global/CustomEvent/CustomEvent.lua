@@ -1,16 +1,17 @@
 --[[
 	@author: 
 		William J. Horn
+		ScriptGuider @ROBLOX.com
 		
 	@description:
 		The CustomEvent library allows you to create and manage your own pseudo events in Lua. It comes
 		packaged with a powerful API that lets you manipulate event connections, use different connection
 		priorities, create event chains, etc.
 		
-		Note: This specific version is taylored to ROBLOX's implementation of Lua.
+		Note: Note: This program was designed to run in the ROBLOX environment with ROBLOX's modified version of Lua.
 		
 	@last-updated:
-		07/14/2023
+		07/16/2023
 		
 	@help:
 		If you have any questions or concerns, please email me at: williamjosephhorn@gmail.com
@@ -33,6 +34,8 @@ local Modules = ReplicatedStorage.Modules
 local uuid = require(Modules.Global.UUID)
 local Debug__Package = require(Modules.Global.Debug)
 local Debug, DebugPriorityLevel = Debug__Package.Debug, Debug__Package.DebugPriorityLevel
+local GameConfig = require(ReplicatedStorage.GameConfig):getConfigForMachine()
+local Analytics = require(Modules.Global.Analytics)
 
 -- Internal imports
 local Enum = require(Modules.Global.EnumExtension)
@@ -91,18 +94,20 @@ function dispatchEvent(payload__original)
 	event._propagating = true
 	
 	-- fire custom internal dispatcher
-	dispatcher:fire(payload__original, true)
+	dispatcher:fire(payload__original)
 	
 	-- fire roblox wait signal
-	event._rbxYieldSignal:Fire(unpack(payload__original.args))
+	event._rbxYieldSignal:Fire(unpack(payload__original.args or {}))
 	
 	-- cancel any yielding threads for event:wait(), if any
 	local yieldTasks = event._yieldTasks
 	
-	for index = 1, #yieldTasks do
-		local yieldTask = yieldTasks[index]
-		task.cancel(yieldTask)
-		yieldTasks[index] = nil
+	if (#yieldTasks > 0) then
+		for index = 1, #yieldTasks do
+			local yieldTask = yieldTasks[index]
+			task.cancel(yieldTask)
+			yieldTasks[index] = nil
+		end
 	end
 	
 	-- conclude event propagation state
@@ -134,90 +139,48 @@ end
 
 function Event:validateDispatch(headers)
 	local settings = headers or self.settings
-	local stats = self.stats
+	local analytics = self.analytics
 	
-	local report = EventValidationReport.new(stats)
-	
-	report:setResult(
-		EventValidationStatus.Rejected,
-		'dispatchesFailed',
-		1
-	)
+	local report = EventValidationReport.new(EventValidationStatus.Rejected)
 	
 	-- special case event overrides
 	if (not settings.withValidation) then
-		report:addReason(
-			DispatchStatusType.DispatchOverride,
-			'dispatchesWithoutValidation',
-			1
-		)
+		report:addReason(DispatchStatusType.DispatchOverride)
 	end
 	
 	if (#report.reasons > 0) then
-		report:setResult(
-			EventValidationStatus.Successful,
-			'dispatchesSuccessful',
-			1
-		)
+		report:setResult(EventValidationStatus.Successful)
 		return report
 	end
 	
 	-- event dispatch validation
 	if self:isDisabled() then
-		report:addReason(
-			DispatchStatusType.Disabled,
-			'dispatchesWhileDisabled',
-			1
-		)
+		report:addReason(DispatchStatusType.Disabled)
 	end
 		
 	if self._anscestorsDisabled > 0 then
-		report:addReason(
-			DispatchStatusType.AnscestorDisabled,
-			'dispatchesWhileAnscestorDisabled',
-			1
-		)
+		report:addReason(DispatchStatusType.AnscestorDisabled)
 	end
 	
 	if #self._connections == 0 and settings.requiresConnection then
-		report:addReason(
-			DispatchStatusType.NoConnection,
-			'dispatchesWithNoConnection',
-			1
-		)
+		report:addReason(DispatchStatusType.NoConnection)
 	end
 	
 	if (self._pausePriority >= self:getHighestGlobalPriority()) then
-		report:addReason(
-			DispatchStatusType.GloballyPaused,
-			'dispatchesWhileGloballyPaused',
-			1
-		) 
+		report:addReason(DispatchStatusType.GloballyPaused) 
 		
 	elseif (self._pausePriority >= self:getHighestLocalPriority()) then
-		report:addReason(
-			DispatchStatusType.LocallyPaused,
-			'dispatchesWhileLocallyPaused',
-			1
-		)
+		report:addReason(DispatchStatusType.LocallyPaused)
 	end
 	
-	if (stats.dispatchesSuccessful >= settings.dispatchLimit) then
-		report:addReason(
-			DispatchStatusType.DispatchLimitReached,
-			'dispatchesWhileLimitReached',
-			1
-		)
+	if (analytics:isActive() and analytics.dispatchesSuccessful >= settings.dispatchLimit) then
+		report:addReason(DispatchStatusType.DispatchLimitReached)
 	end
 	
 	-- update final dispatch report
 	if (#report.reasons == 0) then
 		report:addReason(DispatchStatusType.Successful)
-		report:setResult(
-			EventValidationStatus.Successful,
-			'dispatchesSuccessful',
-			1
-		)
+		report:setResult(EventValidationStatus.Successful)
 	end
 	
 	return report
@@ -329,8 +292,8 @@ end
 function Event:fireAll(...)
 	self:dispatch({
 		args = {...},
-		headers = {
-			dispatchDescendants = true
+		headers__global = {
+			dispatchChildren = true
 		}
 	})
 end
@@ -338,7 +301,7 @@ end
 function Event:fireAsync(...)
 	self:dispatch({
 		args = {...},
-		headers = {
+		headers__local = {
 			async = true
 		}
 	})
@@ -347,9 +310,11 @@ end
 function Event:fireDescendantsOnly(...)
 	self:dispatch({
 		args = {...},
-		headers = {
+		headers__local = {
 			dispatchSelf = false,
-			dispatchDescendants = true
+		},
+		headers__global = {
+			dispatchChildren = true
 		}
 	})
 end
@@ -504,18 +469,26 @@ function Event:isEnabled()
 	return not (self._state == EventStateType.Disabled)
 end
 
+function Event:isActive()
+	local report = self:validateDispatch()
+	return report.result == EventValidationStatus.Successful
+end
+
 function Event:disable()
-	if (self:isDisabled()) then
+	if (self._state == EventStateType.Disabled) then
 		Debug.warn(
 			DebugPriorityLevel.Medium,
 			"Attempted to disable event ["..self._id.."] when event is already disabled."
 		)
 		return
 	else
-		self._prevState = self._state
-		self._state = EventStateType.Disabled
-		
+		local prevState = self._state
+
 		self:queryDescendantEvents(function(event) 
+			event._prevState = prevState
+			event._state = EventStateType.Disabled
+			event._inheritAnscestorsDisabled += 1
+			
 			if (event ~= self) then
 				event._anscestorsDisabled += 1 
 			end
@@ -524,7 +497,7 @@ function Event:disable()
 end
 
 function Event:enable()
-	if (not self:isDisabled()) then
+	if (self._state ~= EventStateType.Disabled) then
 		Debug.warn(
 			DebugPriorityLevel.Medium,
 			"Attempted to enable event ["..self._id.."] when event is already enabled."
@@ -532,9 +505,12 @@ function Event:enable()
 		return
 	end
 	
-	self._state = self._prevState
+	local prevState = self._prevState
 	
 	self:queryDescendantEvents(function(event)
+		event._state = prevState
+		event._inheritAnscestorsDisabled -= 1
+		
 		if (event ~= self) then
 			event._anscestorsDisabled -= 1
 		end
@@ -551,6 +527,7 @@ function Event.new(options)
 		metadata = {},
 		childEvents = {},
 		eventMap = {},
+		scope = {},
 		eventMapReference = nil
 	}
 	
@@ -562,10 +539,8 @@ function Event.new(options)
 	
 	local event = setmetatable({}, Event)
 	
-	--event._highestLocalPriority = defaultPriority
-	--event:getHighestGlobalPriority()
-	--event._globalPriorities = {}
 	event._anscestorsDisabled = 0
+	event._inheritAnscestorsDisabled = 0
 	event._pausePriority = -1
 	event._childEvents = childEvents
 	event._uniqueGlobalPriorities = {}
@@ -583,26 +558,40 @@ function Event.new(options)
 	event._yieldTasks = {}
 	
 	-- event dispatch callbacks
-	--event.onDispatchFailed
-	--event.onDispatchSuccess
+	-- event.onDispatchFailed
+	-- event.onDispatchSuccess
 	
 	event.name = options.name or event._id 
 	event.eventMap = eventMap
 	event.eventMapReference = options.eventMapReference
+	event.scope = options.scope or {}
 	
-	event.stats = {
-		timeLastDispatched = 0,
+	-----------------------------------------------------------------------
+	--- !! Analytics are inactive until the analytics module is complete !!
+	-----------------------------------------------------------------------
+	
+	event.analytics = Analytics.new({
+		--validationKey = 'recordCustomEventAnalytics', 
+	}, {
+		timeLastDispatched = Analytics.stat(0),
 		
-		dispatchesWhileDisabled = 0,
-		dispatchesWhileAnscestorDisabled = 0,
-		dispatchesWithoutValidation = 0,
-		dispatchesWhileGloballyPaused = 0,
-		dispatchesWhileLocallyPaused = 0,
-		dispatchesWithNoConnection = 0,
-		dispatchesWhileLimitReached = 0,
-		dispatchesFailed = 0,
-		dispatchesSuccessful = 0
-	}
+		dispatches = Analytics.category({
+			displayName = "Dispatches", 
+			autoIncrementTotal = true,
+			
+			stats = {
+				whileDisabled = Analytics.stat(0),
+				whileAnscestorDisabled = Analytics.stat(0),
+				withoutValidation = Analytics.stat(0),
+				whileGloballyPaused = Analytics.stat(0),
+				whileLocallyPaused = Analytics.stat(0),
+				withNoConnection = Analytics.stat(0),
+				whileLimitReached = Analytics.stat(0),
+				failed = Analytics.stat(0),
+				successful = Analytics.stat(0),
+			}
+		})
+	})
 	
 	event.settings = {
 		linkedEvents = {},
@@ -615,9 +604,9 @@ function Event.new(options)
 		
 		dispatchLimit = math.huge,
 		
-		dispatchDescendants = false,	-- determins whether or not descendant events will fire
-		dispatchAscendants = false,		-- determins whether or not ascendant events will fire
 		dispatchLinked = true,			-- determins whether or not linked events will fire
+		dispatchParent = false,			-- NEW (untested) determins whether the parent exclusively fires
+		dispatchChildren = false,		-- NEW (untested) determins whether the children excluviely fires
 		dispatchSelf = true, 			-- determins whether or not the direct connections to this event will fire when triggered
 		requiresConnection = true, 		-- determines whether or not the event needs a connection to be triggered
 		withValidation = true, 			-- if event handlers should meet conditions to be executed
@@ -641,6 +630,12 @@ function Event.new(options)
 	if (parentEvent) then
 		parentEvent._childEvents[#parentEvent._childEvents + 1] = event
 		event._rootNode = parentEvent._rootNode or parentEvent
+		
+		event._anscestorsDisabled = parentEvent._inheritAnscestorsDisabled
+		event._inheritAnscestorsDisabled = parentEvent._inheritAnscestorsDisabled
+		event._pausePriority = parentEvent._pausePriority
+		event._prevState = parentEvent._prevState
+		event._state = parentEvent._state
 		 
 		if (options.eventMapReference) then
 			parentEvent.eventMap[options.eventMapReference] = event

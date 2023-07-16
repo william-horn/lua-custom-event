@@ -4,23 +4,6 @@ local EventValidationStatus = require(script.Parent.EventValidationStatus)
 local EventValidationReport = {}
 EventValidationReport.__index = EventValidationReport
 
-function EventValidationReport:updateStats()
-	if (not self.stats) then
-		return
-	end
-	
-	local reasons = self.reasons
-	
-	for index = 1, #reasons do
-		local reason = reasons[index]
-		if (reason.statType and reason.statValue) then
-			self.stats[reason.statType] += reason.statValue
-		end
-	end
-	
-	self.stats[self.resultStatType] += self.resultStatValue
-end
-
 function EventValidationReport:hasDispatchStatus(dispatchStatusType)
 	for index = 1, #self.reasons do
 		local reason = self.reasons[index]
@@ -32,28 +15,19 @@ function EventValidationReport:hasDispatchStatus(dispatchStatusType)
 	return false
 end
 
-function EventValidationReport:addReason(dispatchStatusType, statType, statValue)
-	self.reasons[#self.reasons + 1] = {
-		dispatchStatusType = dispatchStatusType,
-		statType = statType,
-		statValue = statValue
-	}
+function EventValidationReport:addReason(dispatchStatusType)
+	self.reasons[#self.reasons + 1] = dispatchStatusType
 end
 
-function EventValidationReport:setResult(eventValidationStatus, statType, statValue)
+function EventValidationReport:setResult(eventValidationStatus)
 	self.result = eventValidationStatus
-	self.resultStatType = statType
-	self.resultStatValue = statValue
 end
 
-function EventValidationReport.new(stats)
+function EventValidationReport.new(result)
 	local evr = setmetatable({}, EventValidationReport)
 	
-	evr.resultStatType = nil
-	evr.resultStatValue = nil
-	evr.result = nil
+	evr.result = result or EventValidationStatus.Rejected
 	evr.reasons = {} 
-	evr.stats = stats
 
 	return evr
 end
